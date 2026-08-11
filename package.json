@@ -1,0 +1,30 @@
+{
+  "name": "follow-sp-webapp",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && prisma migrate deploy && tsx prisma/seed.ts && next build",
+    "start": "next start",
+    "prisma:migrate": "prisma migrate deploy",
+    "prisma:generate": "prisma generate",
+    "seed": "tsx prisma/seed.ts",
+    "migrate-legacy": "tsx scripts/migrate-legacy-sheet.ts",
+    "sync:manual": "tsx scripts/run-sync-once.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0",
+    "next": "^14.2.5",
+    "papaparse": "^5.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/papaparse": "^5.3.14",
+    "@types/react": "^18.3.0",
+    "prisma": "^5.20.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}
