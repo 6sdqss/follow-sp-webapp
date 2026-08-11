@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": prisma generate && prisma db push --accept-data-loss && tsx prisma/seed.ts && next build,
     "start": "next start",
-    "prisma:migrate": "prisma migrate deploy",
+    "prisma:migrate": "prisma db push --accept-data-loss",
     "prisma:generate": "prisma generate",
     "seed": "tsx prisma/seed.ts",
     "migrate-legacy": "tsx scripts/migrate-legacy-sheet.ts",
