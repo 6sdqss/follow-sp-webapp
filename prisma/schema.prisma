@@ -1,0 +1,217 @@
+// ==========================================================================
+// schema.prisma — Database chính cho FOLLOW SP ONWEB (bản web app)
+// Mirror tinh thần hệ Apps Script cũ, chạy trên Postgres thật. Cập nhật theo
+// 10 quyết định đã chốt với anh Đức (xem README mục "Quyết định cuối cùng"):
+//  - Product    ~ _MASTER_PRODUCT   (INSERT-only, UPDATE chỉ qua service có kiểm soát)
+//  - Workflow   ~ _WORKFLOW         (3 trạng thái: Đang xử lý / Chưa onweb / Đã onweb)
+//  - Staff                          (danh sách nhân viên — TỰ ĐĂNG KÝ khi đăng nhập lần đầu)
+//  - Assignment ~ _ASSIGNMENT       (3 vai trò KHAI_BAO/BAI_VIET/VIDEO — tự gán theo người đăng nhập)
+//  - History    ~ _HISTORY          (append-only audit log)
+//  - Conflict   ~ _CONFLICT         (HARD_CONFLICT / POSSIBLE_DUPLICATE / SOURCE_CHANGED)
+//  - RawImport  ~ _RAW_IMPORT       (chống đọc trùng bằng RowHash)
+//  - FieldMapping ~ _MAPPING        (alias cột nguồn — KHÔNG hardcode, sửa qua UI)
+//  - Setting    ~ _SETTING          (cấu hình runtime)
+//  - SyncRun    ~ _LOG              (lịch sử mỗi lần chạy sync)
+// ==========================================================================
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum ProductStatus {
+  Active
+  Archived
+}
+
+enum SourceKey {
+  LT
+  CE
+  GD
+}
+
+// ==========================================================================
+// Product — 6 NHÓM CỘT theo đúng bảng "Tổng hợp dữ liệu demo" (cấu trúc đích).
+// Quy tắc bất biến: sync CHỈ được phép ghi vào nhóm (1) THÔNG TIN CƠ BẢN và Specs/Folder.
+// MỌI trường còn lại — kể cả khi sản phẩm đã tồn tại — chỉ được sửa qua API PATCH thủ công.
+// ==========================================================================
+model Product {
+  uuid              String   @id @default(uuid())
+
+  // ---- 1) THÔNG TIN CƠ BẢN (sync ghi được) ----
+  erp               String?  @unique
+  tenSanPham        String
+  nganhHang         String?
+  ngayOrder         DateTime?
+  nguonGoc          SourceKey
+  // Site kinh doanh — LUÔN sửa tay, không suy luận tự động theo Ngành hàng (đã chốt).
+  siteKinhDoanh     String[] @default([])
+
+  // ---- 2) CMS (tĩnh — sửa tay) ----
+  id                String?  @unique   // ID sản phẩm chính — trường TĨNH tuyệt đối
+  // ID phiên bản: 1 SP có thể có NHIỀU phiên bản, nhưng CHỈ CẦN NHẬP ID, không tách bảng
+  // riêng (đã chốt) -> lưu dạng mảng text, UI hiển thị dạng nhập nhiều dòng/phẩy.
+  idPhienBanList    String[] @default([])
+  // linkWeb / linkCms KHÔNG lưu trong DB — luôn tính động từ `id`.
+
+  // ---- 3) PIM (tĩnh — sửa tay) ----
+  maModel           String?
+  maBienThe         String?
+
+  // ---- 4) SPECS/FOLDER (sync ghi được) ----
+  specs             String?
+  linkHinh          String?
+
+  // ---- 5) KHAI BÁO SẢN PHẨM ----
+  ghiChu            String?  @default("")
+
+  // ---- 6) BÀI VIẾT (tĩnh — sửa tay, tách riêng theo site) ----
+  baiVietSiteDmx    String?
+  baiVietSiteTgdd   String?
+  slider            String?
+
+  // ---- 7) VIDEO (tĩnh — sửa tay) ----
+  videoNoiDungDeXuat String?
+  videoLink          String?
+  videoNgayUp        DateTime?
+
+  watchedFieldsHash String?
+  status            ProductStatus @default(Active)
+  createdAt         DateTime @default(now())
+  createdBy         String   @default("SYSTEM_SYNC")
+  lastVerifiedAt    DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  workflow    Workflow?
+  assignments Assignment[]
+  history     History[]
+  conflicts   Conflict[]
+
+  @@index([nguonGoc])
+  @@index([status])
+  @@index([nganhHang])
+  @@index([createdAt]) // sản phẩm mới luôn hiển thị trên đầu -> cần index sort theo createdAt
+}
+
+// Workflow — CHỈ 3 trạng thái theo quyết định đã chốt (không còn Priority/8-state cũ).
+// Danh sách state thật vẫn đọc từ Setting.WORKFLOW_STATES để linh hoạt đổi sau này
+// mà không sửa code — mặc định seed sẵn "Đang xử lý|Chưa onweb|Đã onweb".
+model Workflow {
+  uuid           String   @id
+  product        Product  @relation(fields: [uuid], references: [uuid], onDelete: Cascade)
+  state          String   @default("Đang xử lý")
+  stateEnteredAt DateTime @default(now())
+  // NgayOnweb: chỉ set LẦN ĐẦU TIÊN state chạm doneState, không bao giờ ghi đè lại.
+  ngayOnweb      DateTime?
+}
+
+// Staff — danh sách nhân viên, TỰ ĐĂNG KÝ khi đăng nhập lần đầu bằng Mã NV (không mật khẩu).
+// Lần sau chỉ cần gõ đúng maNV -> tự nhận diện tên, dùng để:
+//  (a) hiển thị "TÊN - MÃ NV" khi đăng nhập
+//  (b) tự gán vào cột "Nhân sự" tương ứng khi người này sửa dữ liệu nhóm đó.
+model Staff {
+  maNV      String   @id
+  tenNV     String
+  createdAt DateTime @default(now())
+  lastLogin DateTime @default(now())
+}
+
+// role: 'KHAI_BAO' | 'BAI_VIET' | 'VIDEO' — đúng 3 cột "Nhân sự" trong bảng đích.
+// userName lưu SẴN dạng hiển thị "TÊN - MÃ NV" (chụp lại tại thời điểm gán) để không cần
+// join lại Staff mỗi lần hiển thị, và giữ đúng lịch sử kể cả nếu sau này đổi tên nhân viên.
+// status='Suggested' dùng riêng cho gợi ý ban đầu lấy từ NHÂN SỰ KHAI BÁO của Order CE lúc
+// tạo SP mới (quyết định #10) — người dùng đăng nhập sửa bất kỳ trường nào trong nhóm đó sẽ
+// ghi đè bằng dòng status='Confirmed' của chính họ.
+model Assignment {
+  id         String   @id @default(cuid())
+  uuid       String
+  product    Product  @relation(fields: [uuid], references: [uuid], onDelete: Cascade)
+  role       String
+  maNV       String?  // null nếu là gợi ý tự động từ nguồn (chưa gắn với nhân viên thật)
+  userName   String
+  assignedAt DateTime @default(now())
+  status     String   @default("Confirmed") // Confirmed | Suggested
+
+  @@index([uuid])
+  @@index([uuid, role])
+}
+
+model History {
+  id         String   @id @default(cuid())
+  uuid       String
+  product    Product  @relation(fields: [uuid], references: [uuid], onDelete: Cascade)
+  field      String
+  oldValue   String?
+  newValue   String?
+  changedBy  String
+  changedAt  DateTime @default(now())
+  changeType String
+
+  @@index([uuid])
+  @@index([changedAt])
+}
+
+// Conflict — 3 loại:
+//  HARD_CONFLICT      — 1 dòng nguồn có ERP khớp 2 SP khác nhau (không tự quyết định)
+//  POSSIBLE_DUPLICATE — chưa có ERP, trùng vân tay Tên+Ngành với nhiều SP
+//  SOURCE_CHANGED     — ERP đã tồn tại NHƯNG dữ liệu ở Order CE/GD đã đổi khác hệ thống
+//                        (quyết định #9) — chỉ đánh dấu badge, KHÔNG tự áp dụng, chờ xác nhận tay.
+model Conflict {
+  id            String   @id @default(cuid())
+  type          String
+  matchedUuid   String?
+  product       Product? @relation(fields: [matchedUuid], references: [uuid], onDelete: Cascade)
+  sourceKey     SourceKey?
+  field         String?
+  masterValue   String?
+  incomingValue String?
+  detectedAt    DateTime @default(now())
+  status        String   @default("Open") // Open | Applied | Dismissed | Ignored
+  resolvedBy    String?
+  resolvedAt    DateTime?
+
+  @@index([matchedUuid, status])
+}
+
+// Chống đọc trùng dòng nguồn giữa các lần sync — giống RowHash trong _RAW_IMPORT.
+model RawImportHash {
+  rowHash   String   @id
+  sourceKey SourceKey
+  fetchedAt DateTime @default(now())
+}
+
+// Alias cột nguồn — sửa ở đây (qua UI /settings/mapping), KHÔNG sửa code, vì cấu trúc
+// Order CE/GD "lúc nào cũng update" đúng như anh mô tả.
+model FieldMapping {
+  id            String    @id @default(cuid())
+  sourceKey     String    // 'ALL' | 'CE' | 'GD' | 'LT'
+  internalField String    // ngayOrder | nganhHang | tenModel | maErp | idSanPham | linkFolder |
+                           // userPic | linkHinh | trangThaiOnweb | ngayOnwebSrc | nhanSuKhaiBao
+  aliases       String[]
+  required      Boolean   @default(false)
+
+  @@unique([sourceKey, internalField])
+}
+
+model Setting {
+  key   String @id
+  value String
+  note  String?
+}
+
+model SyncRun {
+  id            String   @id @default(cuid())
+  triggeredBy   String
+  startedAt     DateTime @default(now())
+  durationMs    Int
+  totalRawRead  Int
+  newProducts   Int
+  conflicts     Int
+  errors        Int
+  skipped       Int
+  errorDetail   String?
+}
